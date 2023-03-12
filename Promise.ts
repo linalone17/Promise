@@ -2,14 +2,14 @@ type Nullable<T> = T | null | undefined;
 type AnyFunction = (...args: any) => any;
 
 type Resolve<T> = (value: T) => void;
-type Reject = (reason?: any) => void
+type Reject = (reason?: any) => void;
 type Status = 'pending' | 'fulfilled' | 'rejected';
 type OnResolve<T> = (value: T) => MyPromise<unknown> | unknown;
 type OnReject = (reason?: any) => void;
-type Action = {
-    onResolve: Nullable<OnResolve<any>>;
+type Action<T> = {
+    onResolve: Nullable<OnResolve<T>>;
     onReject: Nullable<OnReject>;
-    resolveNext: Resolve<any>;
+    resolveNext: Resolve<unknown>;
     rejectNext: Reject;
 }
 
@@ -19,40 +19,36 @@ const $$onResolve = Symbol('onResolve');
 const $$onReject = Symbol('onReject');
 
 export class MyPromise<T> {
-    status: Status;
-    actionQueue: Action[];
-    private data: any = null; // error or value
-    [$$onResolve]: Nullable<AnyFunction> = null;
-    [$$onReject]: Nullable<AnyFunction> = null;
+    #status: Status = 'pending';
+    #actionQueue: Action<T>[] = [];
+    #data: any = null; // error or value;
+
+    // controlled via $$ props
+    #onResolveQueue: Resolve<T>[] = [];
+    #onRejectQueue: Reject[] = [];
 
     constructor (executor: (resolve: Resolve<T>, reject: Reject) => void) {
-        this.status = 'pending';
-        this.actionQueue = [];
-        this.resolve = this.resolve.bind(this);
-        this.reject = this.reject.bind(this);
-        executor(this.resolve, this.reject);
-    
+        executor(this.#resolve.bind(this), this.#reject.bind(this));
     }
 
-    resolve (value: T) {
-        if (this.status !== "pending") return;
+    #resolve (value: T) {
+        if (this.#status !== "pending") return;
 
-        this.status = 'fulfilled';
-        this.data = value;
-        if (this[$$onResolve]) this[$$onResolve]();
+        this.#status = 'fulfilled';
+        this.#data = value;
+        this.#onResolveQueue.forEach(fn => fn(value));
 
-        this.actionQueue.forEach((action) => {
+        this.#actionQueue.forEach((action) => {
             queueMicrotask(() => {
                 const cbReturn = action.onResolve ? action.onResolve(value) : undefined;
                 if (cbReturn instanceof MyPromise) {
 
                     cbReturn
-                        .then((val) => {
-                            action.resolveNext(val);
-                        })
-                        .catch((reason: any) => {
-                            action.rejectNext(reason);
-                        })
+                        .then(
+                            (value) => {action.resolveNext(value)},
+                            (reason) => {action.rejectNext(reason)}
+                        )
+                        
                 } else {
                     action.resolveNext(cbReturn);
                 }
@@ -64,16 +60,20 @@ export class MyPromise<T> {
         return new MyPromise<T>((res) => {res(value)})
     }
 
-    reject (reason?: any) {
-        if (this.status !== "pending") return;
+    #reject (reason?: any) {
+        if (this.#status !== "pending") return;
 
-        this.status = 'rejected';
-        this.data = reason;
-        if (this[$$onReject]) this[$$onReject]();
+        this.#status = 'rejected';
+        this.#data = reason;
+        this.#onRejectQueue.forEach(fn => fn(reason));
 
-        this.actionQueue.forEach((action) => {
-            if (action.onReject) action.onReject(reason);
-            action.rejectNext(reason);
+        this.#actionQueue.forEach((action) => {
+            if (action.onReject) {
+                action.resolveNext(action.onReject(reason));
+            } else {
+                action.rejectNext(reason);
+            }
+        
         })
     }
 
@@ -81,11 +81,11 @@ export class MyPromise<T> {
         return new MyPromise((_, rej) => {rej(reason)})
     }
 
-    then<T>(onResolve?: OnResolve<T>, onReject?: OnReject): MyPromise<unknown> {
-        switch(this.status) {
+    then(onResolve?: OnResolve<T>, onReject?: OnReject): MyPromise<unknown> {
+        switch(this.#status) {
             case "pending":
                 return new MyPromise((res, rej) => {
-                    this.actionQueue.push({
+                    this.#actionQueue.push({
                         onResolve,
                         onReject,
                         resolveNext: res,
@@ -95,21 +95,26 @@ export class MyPromise<T> {
             case "fulfilled":
                 return new MyPromise((res, rej) => {
                     queueMicrotask(() => {
-                        const cbReturn = onResolve ? onResolve(this.data) : undefined;
+                        const cbReturn = onResolve ? onResolve(this.#data) : undefined;
                         if (cbReturn instanceof MyPromise) {
                             cbReturn
-                                .then((value) => res(value))
-                                .catch((reason) => rej(reason))
+                                .then(
+                                    (value) => res(value),
+                                    (reason) => rej(reason)
+                                )
                         } else {
                             res(cbReturn)
                         }
                     })
                 })
             case "rejected":
-                return new MyPromise((_, rej) => {
+                return new MyPromise((res, rej) => {
                     queueMicrotask(() => {
-                        if (onReject) onReject(this.data);
-                        rej();
+                        if (onReject) {
+                            res(onReject(this.#data));
+                        } else {
+                            rej(this.#data);
+                        }
                     })
                 })
         }
@@ -119,54 +124,180 @@ export class MyPromise<T> {
         return this.then(undefined, onReject)
     }
 
-    all (promises: MyPromise<unknown>[]) {
+    static all (promises: MyPromise<unknown>[]) {
         let resolvedAmount = 0;
         const promisesAmount = promises.length;
-        return new MyPromise((res, rej) => {
+        return new MyPromise((resolve, reject) => {
             promises.forEach((promise) => {
-                promise[$$onReject] = () => {
-                    rej()
+                promise[$$onReject] = (reason) => {
+                    reject(reason)
                 }
                 promise[$$onResolve] = () => {
                     resolvedAmount++;
                     if (resolvedAmount === promisesAmount) {
+                        resolve(promises.map((promise) => promise.#data));
                     }
                 }
             })
         })
     }
 
-    allSettled (promises: MyPromise<unknown>[]) {
+    static allSettled (promises: MyPromise<unknown>[]) {
+        let settledAmount = 0;
+        const promisesAmount = promises.length;
 
+        return new MyPromise((resolve) => {
+            promises.forEach((promise) => {
+                promise[$$onReject] = () => {
+                    settledAmount++
+                }
+                promise[$$onResolve] = () => {
+                    settledAmount++
+                }
+                if (settledAmount === promisesAmount) {
+                    resolve(promises.map((promise) => {
+                        return promise.#status === 'fulfilled'
+                            ? {status: promise.#status, value: promise.#data}
+                            : {status: promise.#status, reason: promise.#data}
+                    }))
+                }
+            })
+        })
     }
 
-    race (promises: MyPromise<unknown>[]) {
+    static race (promises: MyPromise<unknown>[]) {
+        return new MyPromise((resolve, reject) => {
+            promises.forEach((promise) => {
+                promise[$$onReject] = (reason) => {
+                    reject(reason);
+                }
+                promise[$$onResolve] = (value) => {
+                    resolve(value);
+                }
+            })
+        })
+    }
 
+    set [$$onResolve](onResolve: Resolve<T>) {
+        if (this.#status === 'pending') {
+            this.#onResolveQueue.push(onResolve);
+        } else if (onResolve) {
+            onResolve(this.#data);
+        }
+    }
+
+
+    set [$$onReject](onReject: Reject) {
+        if (this.#status === 'pending') {
+            this.#onRejectQueue.push(onReject);
+        } else if (onReject) {
+            onReject(this.#data);
+        }
+    }
+    
+
+    get [Symbol.toStringTag]() {
+        switch(this.#status) {
+            case 'pending':
+                return 'Promise: <pending>'
+            default:
+                return `Promise: <${this.#status}>: ${this.#data}`
+        }
     }
 }
 
 // a lil bit of testing
-const Promise = MyPromise; // (un)comment to switch between MyPromise and Promise
+// const Promise = MyPromise; // (un)comment to switch between MyPromise and Promise
 
-function sleep(ms: number) {
-    return new Promise((res) => {setTimeout(res, ms)})
-}
+// function sleep(ms: number) {
+//     return new Promise((res) => {setTimeout(res, ms)})
+// }
 
-const a = new Promise<string>((res) => {
-    res('a')
-})
-.then((val) => {
-    console.log(val);
-    return sleep(3000);
-})
-.then(() => {
-    console.log('after sleep');
-    return Promise.resolve('value')
-})
-.then((value) => {
-    console.log('should be value:', value)
-})
+// console.log('grim');
 
-// const a = Promise.resolve('hello').then((value) => console.log(value));
-console.log('grim')
-console.log('beam')
+// const a = new Promise<string>((res) => {
+//     res('a')
+// })
+// .then((val) => {
+//     console.log(val);
+//     return sleep(3000);
+// })
+// .then(() => {
+//     console.log('after sleep');
+//     return Promise.resolve('value')
+// })
+// .then((value) => {
+//     console.log('should be value:', value)
+// })
+
+// const b = Promise.resolve('hello').then((value) => value);
+
+// b.then((value) => console.log('1:', value));
+// b.then((value) => console.log('2:', value));
+// b.then((value) => console.log('3:', value));
+// b.then((value) => console.log('4:', value));
+
+// const c = Promise.reject('not funny')
+//     .then(value => {
+//         console.log('shouldnt be logged')
+//         return sleep(3000);
+//     })
+// const d = c
+//     .catch(reason => {
+//         console.log('rejected, reason:', reason)
+//         return 1
+//     })
+// const e = d
+//     .then((value) => {
+//         console.log('undefined', value)
+//     })
+// setTimeout(() => {console.log(c, d, e)}, 5000) // rejected, fulfilled: 1, fulfilled: undefined
+
+// const f = new Promise((res, rej) => {
+//     setTimeout(() => res(1000), 1000)
+// })
+// .then((value) => {
+//     console.log(value);
+//     return value
+// });
+
+// const g = new Promise((res, rej) => {
+//     setTimeout(() => res(5000), 5000)
+// })
+// .then((value) => {
+//     console.log(value);
+//     return value
+// });
+
+// const h = new Promise((res, rej) => {
+//     setTimeout(() => res(2000), 2000)
+// })
+// .then((value) => {
+//     console.log(value);
+//     return value
+// });
+
+// const i = new Promise((res, rej) => {
+//     setTimeout(() => rej('rejected'), 10000)
+// })
+// .then((value) => {
+//     console.log(value);
+//     return value
+// });
+// const j = new Promise((res, rej) => {
+//     setTimeout(() => rej('rejected'))
+// })
+// .then((value) => {
+//     console.log(value);
+//     return value
+// });
+
+// const all = Promise.all([f, g, h]).then(console.log);
+// const allRej = Promise.all([f, g, h, i]).then(console.log).catch(console.log);
+
+// const race = Promise.race([f, g, h, i])
+//     .then((v) => console.log('race resolved', v)).catch((r) => console.log('race rejected', r)); //rejected
+
+// const raceRej = Promise.race([f, g, h, i, j])
+//     .then((v) => console.log('race resolved', v)).catch((r) => console.log('race rejected', r)); //resolved
+// console.log('beam');
