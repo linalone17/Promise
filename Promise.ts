@@ -1,5 +1,4 @@
 type Nullable<T> = T | null | undefined;
-type AnyFunction = (...args: any) => any;
 
 type Resolve<T> = (value: T) => void;
 type Reject = (reason?: any) => void;
