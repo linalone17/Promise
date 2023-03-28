@@ -1,3 +1,5 @@
+import { resolveProjectReferencePath } from "typescript";
+
 type Nullable<T> = T | null | undefined;
 
 type Resolve<T> = (value: T) => void;
@@ -11,6 +13,16 @@ type Action<T> = {
     resolveNext: Resolve<unknown>;
     rejectNext: Reject;
 }
+type RejectedAsObject = {
+    status: 'rejected';
+    reason?: any;
+}
+
+type FulfilledAsObject = {
+    status: 'fulfilled';
+    value: unknown;
+}
+type SettledAsObject = RejectedAsObject | FulfilledAsObject;
 
 
 // "private" fields for external use, especially Promise.all/allSettled/race
@@ -133,6 +145,7 @@ export class MyPromise<T> {
                 }
                 promise[$$onResolve] = () => {
                     resolvedAmount++;
+
                     if (resolvedAmount === promisesAmount) {
                         resolve(promises.map((promise) => promise.#data));
                     }
@@ -148,17 +161,18 @@ export class MyPromise<T> {
         return new MyPromise((resolve) => {
             promises.forEach((promise) => {
                 promise[$$onReject] = () => {
-                    settledAmount++
+                    settledAmount++;
                 }
                 promise[$$onResolve] = () => {
-                    settledAmount++
-                }
-                if (settledAmount === promisesAmount) {
-                    resolve(promises.map((promise) => {
-                        return promise.#status === 'fulfilled'
-                            ? {status: promise.#status, value: promise.#data}
-                            : {status: promise.#status, reason: promise.#data}
-                    }))
+                    settledAmount++;
+
+                    if (settledAmount === promisesAmount) {
+                        resolve(promises.map((promise) => {
+                            return promise.#status === 'fulfilled'
+                                ? {status: promise.#status, value: promise.#data}
+                                : {status: promise.#status, reason: promise.#data}
+                        }))
+                    }
                 }
             })
         })
@@ -173,6 +187,29 @@ export class MyPromise<T> {
                 promise[$$onResolve] = (value) => {
                     resolve(value);
                 }
+            })
+        })
+    }
+
+    static any (promises: MyPromise<unknown>[]) {
+        const promisesAmount = promises.length;
+        
+        return new MyPromise((resolve, reject) => {
+            const reasons: Array<any> = [];
+            MyPromise.allSettled(promises).then((value) => {
+                const settled = value as SettledAsObject[];
+
+                for (let i = 0; i < settled.length; i++) {
+                    const item = settled[i];
+
+                    if (item.status === 'fulfilled') {
+                        resolve(item.value);
+                        break;
+                    } else {
+                        reasons.push(item.reason);
+                    }
+                }
+                reject(new AggregateError(reasons, 'All promises were rejected'));
             })
         })
     }
